@@ -86,12 +86,13 @@ def _scale(image, min=0.9, max=1.1):
     M = cv2.getRotationMatrix2D((cols/2,rows/2), 0, scale)
     return cv2.warpAffine(image, M, (cols, rows)), M, scale
 
-def _brightness(image, min=0.5, max=2.0):
+def _brightness(image_add, min=0.5, max=2.0):
     '''
     Randomly change the brightness of the input image.
 
     Protected against overflow.
     '''
+    image = image_add[:, :, 0:3]
     hsv = cv2.cvtColor(image,cv2.COLOR_RGB2HSV)
 
     random_br = np.random.uniform(min,max)
@@ -102,8 +103,7 @@ def _brightness(image, min=0.5, max=2.0):
     mask = hsv[:,:,2] * random_br > 255
     v_channel = np.where(mask, 255, hsv[:,:,2] * random_br)
     hsv[:,:,2] = v_channel
-
-    return cv2.cvtColor(hsv,cv2.COLOR_HSV2RGB)
+    return np.dstack((cv2.cvtColor(hsv,cv2.COLOR_HSV2RGB), image_add[:, :, 3:]))
 
 def histogram_eq(image):
     '''
@@ -137,6 +137,7 @@ class BatchGenerator:
 
     def __init__(self,
                  images_path,
+                 images_path_mul_channel,
                  include_classes='all',
                  box_output_format=['class_id', 'xmin', 'xmax', 'ymin', 'ymax']):
         '''
@@ -156,6 +157,7 @@ class BatchGenerator:
         '''
         # These are the variables we always need
         self.images_path = images_path
+        self.images_path_mul_channel = images_path_mul_channel
         self.include_classes = include_classes
         self.box_output_format = box_output_format
 
@@ -217,7 +219,7 @@ class BatchGenerator:
 
         data = []
 
-        with open(self.labels_path, newline='') as csvfile:
+        with open(self.labels_path) as csvfile:
             csvread = csv.reader(csvfile, delimiter=',')
             k = 0
             for i in csvread: # For every line (i.e for every bounding box) in the CSV file...
@@ -261,109 +263,6 @@ class BatchGenerator:
 
         if ret: # In case we want to return these
             return self.filenames, self.labels
-
-    def parse_xml(self,
-                  annotations_path=None,
-                  image_set_path=None,
-                  image_set=None,
-                  classes=['background',
-                           'aeroplane', 'bicycle', 'bird', 'boat',
-                           'bottle', 'bus', 'car', 'cat',
-                           'chair', 'cow', 'diningtable', 'dog',
-                           'horse', 'motorbike', 'person', 'pottedplant',
-                           'sheep', 'sofa', 'train', 'tvmonitor'],
-                  exclude_truncated=False,
-                  exclude_difficult=False,
-                  ret=False):
-        '''
-        This is an XML parser for the Pascal VOC datasets. It might be applicable to other datasets with minor changes to
-        the code, but in its current form it expects the data format and XML tags of the Pascal VOC datasets.
-
-        Arguments:
-            annotations_path (str, optional): The path to the directory that contains the annotation XML files for
-                the images. The directory must contain one XML file per image and name of the XML file must be the
-                image ID. The content of the XML files must be in the Pascal VOC format. Defaults to `None`.
-            image_set_path (str, optional): The path to the directory that contains a text file with the image
-                set to be loaded. Defaults to `None`.
-            image_set (str, optional): The name of the image set text file to be loaded, ending in '.txt'.
-                This text file simply contains one image ID per line and nothing else. Defaults to `None`.
-            classes (list, optional): A list containing the names of the object classes as found in the
-                `name` XML tags. Must include the class `background` as the first list item. The order of this list
-                defines the class IDs. Defaults to the list of Pascal VOC classes in alphabetical order.
-            exclude_truncated (bool, optional): If `True`, excludes boxes that are labeled as 'truncated'.
-                Defaults to `False`.
-            exclude_difficult (bool, optional): If `True`, excludes boxes that are labeled as 'difficult'.
-                Defaults to `False`.
-            ret (bool, optional): Whether or not the image filenames and labels are to be returned.
-                Defaults to `False`.
-
-        Returns:
-            None by default, optionally the image filenames and labels.
-        '''
-
-        if not annotations_path is None: self.annotations_path = annotations_path
-        if not image_set_path is None: self.image_set_path = image_set_path
-        if not image_set is None: self.image_set = image_set
-        if not classes is None: self.classes = classes
-
-        # Erase data that might have been parsed before
-        self.filenames = []
-        self.labels = []
-
-        # Parse the image set that so that we know all the IDs of all the images to be included in the dataset
-        with open(os.path.join(self.image_set_path, self.image_set)) as f:
-            image_ids = [line.strip() for line in f]
-
-        # Parse the labels for each image ID from its respective XML file
-        for image_id in image_ids:
-            # Open the XML file for this image
-            with open(os.path.join(self.annotations_path, image_id+'.xml')) as f:
-                soup = BeautifulSoup(f, 'xml')
-
-            folder = soup.folder.text # In case we want to return the folder in addition to the image file name. Relevant for determining which dataset an image belongs to.
-            filename = soup.filename.text
-            self.filenames.append(filename)
-
-            boxes = [] # We'll store all boxes for this image here
-            objects = soup.find_all('object') # Get a list of all objects in this image
-
-            # Parse the data for each object
-            for obj in objects:
-                class_name = obj.find('name').text
-                class_id = self.classes.index(class_name)
-                # Check if this class is supposed to be included in the dataset
-                if (not self.include_classes == 'all') and (not class_id in self.include_classes): continue
-                pose = obj.pose.text
-                truncated = int(obj.truncated.text)
-                if exclude_truncated and (truncated ==1): continue
-                difficult = int(obj.difficult.text)
-                if exclude_difficult and (difficult == 1): continue
-                xmin = int(obj.bndbox.xmin.text)
-                ymin = int(obj.bndbox.ymin.text)
-                xmax = int(obj.bndbox.xmax.text)
-                ymax = int(obj.bndbox.ymax.text)
-                item_dict = {'folder': folder,
-                             'image_name': filename,
-                             'image_id': image_id,
-                             'class_name': class_name,
-                             'class_id': class_id,
-                             'pose': pose,
-                             'truncated': truncated,
-                             'difficult': difficult,
-                             'xmin': xmin,
-                             'ymin': ymin,
-                             'xmax': xmax,
-                             'ymax': ymax}
-                box = []
-                for item in self.box_output_format:
-                    box.append(item_dict[item])
-                boxes.append(box)
-
-            self.labels.append(boxes)
-
-        if ret:
-            return self.filenames, self.labels
-
 
     def generate(self,
                  batch_size=32,
@@ -487,7 +386,10 @@ class BatchGenerator:
 
             for filename in self.filenames[current:current+batch_size]:
                 with Image.open('{}'.format(os.path.join(self.images_path, filename))) as img:
-                    batch_X.append(np.array(img))
+                  with Image.open('{}'.format(os.path.join(self.images_path_mul_channel, filename[0:-4]+'.png'))) as img_add:
+                    img_merge = np.dstack((np.array(img), np.array(img_add)))
+                    # print img_merge.shape
+                    batch_X.append(img_merge)
             batch_y = deepcopy(self.labels[current:current+batch_size])
 
             this_filenames = self.filenames[current:current+batch_size] # The filenames of the files in the current batch
